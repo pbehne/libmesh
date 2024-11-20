@@ -15,17 +15,17 @@
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-
-
 #ifndef LIBMESH_MESH_SMOOTHER_H
 #define LIBMESH_MESH_SMOOTHER_H
+
+// Local Includes
+#include "libmesh/unstructured_mesh.h"
 
 namespace libMesh
 {
 
 // forward declarations
 class UnstructuredMesh;
-
 
 /**
  * This class provides the necessary interface for
@@ -42,8 +42,11 @@ public:
    * Constructor.  Sets the mesh reference
    * in the protected data section of the class.
    */
-  explicit
-  MeshSmoother(UnstructuredMesh & mesh) : _mesh(mesh) {}
+  explicit MeshSmoother(UnstructuredMesh & mesh) : _mesh(mesh)
+  {
+    // Can have issues with neighbors not being computed if this is not called
+    mesh.prepare_for_use();
+  }
 
   /**
    * Destructor.
@@ -57,11 +60,9 @@ public:
   virtual void smooth() = 0;
 
 protected:
-
   UnstructuredMesh & _mesh;
 };
 
 } // namespace libMesh
-
 
 #endif // LIBMESH_MESH_SMOOTHER_H

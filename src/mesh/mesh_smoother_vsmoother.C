@@ -15,7 +15,13 @@
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
+#include "libmesh/dense_matrix.h"
+#include "libmesh/fuzzy_equals.h"
+#include "libmesh/id_types.h"
+#include "libmesh/int_range.h"
+#include "libmesh/libmesh_common.h"
 #include "libmesh/libmesh_config.h"
+#include "libmesh/tensor_value.h"
 #if defined(LIBMESH_ENABLE_VSMOOTHER) && LIBMESH_DIM > 1
 
 // Local includes
@@ -121,10 +127,12 @@ VariationalMeshSmoother::VariationalMeshSmoother(UnstructuredMesh & mesh,
   _area_of_interest(area_of_interest)
 {}
 
-
-
-Real VariationalMeshSmoother::smooth(unsigned int)
+Real
+VariationalMeshSmoother::smooth(unsigned int n_iterations)
 {
+  // Sticking this here since I haven't seen a check for this yet (however I haven't looked hard)
+  libmesh_assert_greater(_dim, 1);
+
   // If the log file is already open, for example on subsequent calls
   // to smooth() on the same object, we'll just keep writing to it,
   // otherwise we'll open it...
@@ -192,6 +200,7 @@ Real VariationalMeshSmoother::smooth(unsigned int)
   iter[0] = miniter;
   iter[1] = maxiter;
   iter[2] = miniterBC;
+  // iter[3] = ??? Why is the size 4 when iter[3] is never used?
 
   // grid optimization
   _logfile << "Starting Grid Optimization" << std::endl;
@@ -286,85 +295,134 @@ int VariationalMeshSmoother::readgr(Array2D<Real> & R,
     std::unordered_map<dof_id_type, std::vector<const Elem *>> nodes_to_elem_map;
     MeshTools::build_nodes_to_elem_map(_mesh, nodes_to_elem_map);
 
-    int i = 0;
     for (auto & node : _mesh.node_ptr_range())
       {
         // Get a reference to the node
         Node & node_ref = *node;
+        const dof_id_type node_id = node->id();
 
         // For each node grab its X Y [Z] coordinates
         for (unsigned int j=0; j<_dim; j++)
-          R[i][j] = node_ref(j);
+            R[node_id][j] = node_ref(j);
 
         // Set the Proper Mask
         // Internal nodes are 0
         // Immovable boundary nodes are 1
         // Movable boundary nodes are 2
-        if (boundary_node_ids.count(i))
-          {
-            // Only look for sliding edge nodes in 2D
+        if (boundary_node_ids.count(node_id))
+        {
+            // Find all the nodal neighbors... that is the nodes directly connected
+            // to this node through one edge
+            std::vector<const Node *> neighbors;
+            MeshTools::find_nodal_neighbors(_mesh, node_ref, nodes_to_elem_map, neighbors);
+
+            // Determine whether the current node is colinear (coplanar) with it's boundary
+            // neighbors Start by computing the vectors from the current node to each boundary
+            // neighbor node
+            std::vector<Point> dist_vecs;
+            for (const auto & neighbor : neighbors)
+            {
+              // We only consider neighbors on the boundary
+              if (!boundary_node_ids.count(neighbor->id()))
+                continue;
+
+              dist_vecs.push_back((*neighbor) - (*node));
+            }
+
+            // Start with the assumption that the node is movable and prove otherwise
+            mask[node_id] = 2;
+
+            // 2D: If the current node and all (two) boundary neighbor nodes lie on the same line,
+            // the magnitude of the dot product of the distance vectors will be equal
+            // to the product of the magnitudes of the vectors. This is because the distance
+            // vectors lie on the same line, so the cos(theta) term in the dot product
+            // evaluates to -1 or 1.
             if (_dim == 2)
+            {
+              // Physically, the boundary of a 2D mesh is a 1D curve. By the
+              // definition of a "neighbor", it is only possible for a node
+              // to have 2 neighbors on the boundary.
+              libmesh_assert_equal_to(dist_vecs.size(), _dim);
+              const Real dot_product = dist_vecs[0] * dist_vecs[1];
+              const Real norm_product = dist_vecs[0].norm() * dist_vecs[1].norm();
+
+              // node is not colinear with its boundary neighbors and is thus immovable
+              if (!relative_fuzzy_equals(std::abs(dot_product), norm_product))
+                mask[node_id] = 1;
+            }
+
+            // 3D: If the current node and all boundary neighbor nodes lie on the same plane,
+            // all the distance vectors from the current node to the boundary nodes will be
+            // orthogonal to the plane normal. We can obtain a reference normal by normalizing
+            // the cross product between two of the distance vectors. If the normalized cross
+            // products of all other combinations (excluding self combinations) match this
+            // reference normal, then the current node is coplanar with all of its boundary nodes.
+            else
+            {
+              // We should have at least 2 distance vectors to compute a normal with in 3D
+              libmesh_assert_greater_equal(dist_vecs.size(), 2);
+
+              // Compute the reference normal by taking the cross product of two vectors in
+              // dist_vecs. We will use dist_vecs[0] as the first vector and the next available
+              // vector in dist_vecs that is not (anti)parallel to dist_vecs[0]. Without this
+              // check we may end up with a zero vector for the reference vector.
+              unsigned int vec_index;
+              const Point vec_0_normalized = dist_vecs[0] / dist_vecs[0].norm();
+              for (const auto ii : make_range(size_t(1), dist_vecs.size()))
               {
-                // Find all the nodal neighbors... that is the nodes directly connected
-                // to this node through one edge
-                std::vector<const Node *> neighbors;
-                MeshTools::find_nodal_neighbors(_mesh, node_ref, nodes_to_elem_map, neighbors);
-
-                // Grab the x,y coordinates
-                Real x = node_ref(0);
-                Real y = node_ref(1);
-
-                // Theta will represent the atan2 angle (meaning with the proper quadrant in mind)
-                // of the neighbor node in a system where the current node is at the origin
-                Real theta = 0;
-                std::vector<Real> thetas;
-
-                // Calculate the thetas
-                for (const auto & neighbor : neighbors)
-                  {
-                    // Note that the x and y values of this node are subtracted off
-                    // this centers the system around this node
-                    theta = atan2((*neighbor)(1)-y, (*neighbor)(0)-x);
-
-                    // Save it for later
-                    thetas.push_back(theta);
-                  }
-
-                // Assume the node is immovable... then prove otherwise
-                mask[i] = 1;
-
-                // Search through neighbor nodes looking for two that form a straight line with this node
-                for (auto a : make_range(thetas.size()-1))
-                  {
-                    // Only try each pairing once
-                    for (auto b : IntRange<std::size_t>(a+1, thetas.size()))
-                      {
-                        // Find if the two neighbor nodes angles are 180 degrees (pi) off of each other (within a tolerance)
-                        // In order to make this a true movable boundary node... the two that forma  straight line with
-                        // it must also be on the boundary
-                        if (boundary_node_ids.count(neighbors[a]->id()) &&
-                            boundary_node_ids.count(neighbors[b]->id()) &&
-                            (
-                             (std::abs(thetas[a] - (thetas[b] + (libMesh::pi))) < .001) ||
-                             (std::abs(thetas[a] - (thetas[b] - (libMesh::pi))) < .001)
-                             )
-                            )
-                          {
-                            // if ((*(*it))(1) > 0.25 || (*(*it))(0) > .7 || (*(*it))(0) < .01)
-                            mask[i] = 2;
-                          }
-
-                      }
-                  }
+                // (anti)parallel check
+                const bool is_parallel =
+                    vec_0_normalized.relative_fuzzy_equals(dist_vecs[ii] / dist_vecs[ii].norm());
+                const bool is_antiparallel =
+                    vec_0_normalized.relative_fuzzy_equals(-dist_vecs[ii] / dist_vecs[ii].norm());
+                if (!(is_parallel || is_antiparallel))
+                {
+                  vec_index = ii;
+                  break;
+                }
               }
-            else // In 3D set all boundary nodes to be fixed
-              mask[i] = 1;
+
+              Point reference_normal = dist_vecs[0].cross(dist_vecs[vec_index]);
+              reference_normal /= reference_normal.norm();
+
+              bool node_is_immovable = false;
+              for (const auto ii : index_range(dist_vecs))
+              {
+                // Early exit criteria
+                if (node_is_immovable)
+                  break;
+
+                for (const auto jj : make_range(ii + 1, dist_vecs.size()))
+                {
+                  // No need to compute the cross product for this case, as it is by
+                  // definition equal to the reference normal computed above.
+                  // Also check for dist_vecs that are (anti)parallel, and skip,
+                  // as their cross product will be zero.
+                  const Point vec_ii_normalized = dist_vecs[ii] / dist_vecs[ii].norm();
+                  const bool is_parallel =
+                      vec_ii_normalized.relative_fuzzy_equals(dist_vecs[jj] / dist_vecs[jj].norm());
+                  const bool is_antiparallel = vec_ii_normalized.relative_fuzzy_equals(
+                      dist_vecs[jj] / -dist_vecs[jj].norm());
+                  if ((ii == 0 and jj == vec_index) || (is_parallel || is_antiparallel))
+                    continue;
+
+                  Point normal = dist_vecs[ii].cross(dist_vecs[jj]);
+                  normal /= normal.norm();
+
+                  // node is not coplanar with its boundary neighbors and is this immovable
+                  if (!(reference_normal.relative_fuzzy_equals(normal) ||
+                        reference_normal.relative_fuzzy_equals(-normal)))
+                  {
+                    mask[node_id] = 1;
+                    node_is_immovable = true;
+                    break;
+                  }
+                }
+              }
+            }
           }
         else
-          mask[i] = 0;  // Internal Node
-
-        // libMesh::out << "Node: " << i << "  Mask: " << mask[i] << std::endl;
-        i++;
+            mask[node_id] = 0; // Internal Node
       }
   }
 
@@ -404,7 +462,7 @@ int VariationalMeshSmoother::readgr(Array2D<Real> & R,
               case 4:  // Quad 4
                 cells[i][0] = elem->node_id(0);
                 cells[i][1] = elem->node_id(1);
-                cells[i][2] = elem->node_id(3); // Note that 2 and 3 are switched!
+                cells[i][2] = elem->node_id(3); // Note that 2 and 3 are switched! WHY???
                 cells[i][3] = elem->node_id(2);
                 num = 4;
                 break;
@@ -429,12 +487,12 @@ int VariationalMeshSmoother::readgr(Array2D<Real> & R,
               case 8:
                 cells[i][0] = elem->node_id(0);
                 cells[i][1] = elem->node_id(1);
-                cells[i][2] = elem->node_id(3); // Note that 2 and 3 are switched!
+                cells[i][2] = elem->node_id(3); // Note that 2 and 3 are switched! WHY???
                 cells[i][3] = elem->node_id(2);
 
                 cells[i][4] = elem->node_id(4);
                 cells[i][5] = elem->node_id(5);
-                cells[i][6] = elem->node_id(7); // Note that 6 and 7 are switched!
+                cells[i][6] = elem->node_id(7); // Note that 6 and 7 are switched! WHY???
                 cells[i][7] = elem->node_id(6);
                 num=8;
                 break;
@@ -624,7 +682,7 @@ int VariationalMeshSmoother::basisA(Array2D<Real> & Q,
                                     const Array2D<Real> & H,
                                     int me)
 {
-  Array2D<Real> U(_dim, nvert);
+  Array2D<Real> U(_dim, nvert); // What does U represent, the Jacobian?
 
   // Some useful constants
   const Real
@@ -891,36 +949,33 @@ void VariationalMeshSmoother::full_smooth(Array2D<Real> & R,
                                           int gr)
 {
   // Control the amount of print statements in this function
-  int msglev = 1;
+    int msglev = 10;
 
-  dof_id_type afun_size = 0;
+    dof_id_type afun_size = 0;
 
-  // Adaptive function is on cells
-  if (adp < 0)
-    afun_size = _n_cells;
+    // Adaptive function is on cells
+    if (adp < 0)
+        afun_size = _n_cells;
 
-  // Adaptive function is on nodes
-  else if (adp > 0)
-    afun_size = _n_nodes;
+    // Adaptive function is on nodes
+    else if (adp > 0)
+        afun_size = _n_nodes;
 
-  std::vector<Real> afun(afun_size);
-  std::vector<int> maskf(_n_nodes);
-  std::vector<Real> Gamma(_n_cells);
+    std::vector<Real> afun(afun_size);
+    std::vector<int> maskf(_n_nodes);
+    std::vector<Real> Gamma(_n_cells);
 
-  if (msglev >= 1)
-    _logfile << "N=" << _n_nodes
-             << " ncells=" << _n_cells
-             << " nedges=" << _n_hanging_edges
-             << std::endl;
+    if (msglev >= 1)
+        _logfile << "N=" << _n_nodes << " ncells=" << _n_cells << " nedges=" << _n_hanging_edges
+                 << std::endl;
 
+    // Boundary node counting
+    int NBN = 0;
+    for (dof_id_type i = 0; i < _n_nodes; i++)
+        if (mask[i] == 2 || mask[i] == 1)
+          NBN++;
 
-  // Boundary node counting
-  int NBN=0;
-  for (dof_id_type i=0; i<_n_nodes; i++)
-    if (mask[i] == 2 || mask[i] == 1)
-      NBN++;
-
-  if (NBN > 0)
+    if (NBN > 0)
     {
       if (msglev >= 1)
         _logfile << "# of Boundary Nodes=" << NBN << std::endl;
@@ -974,6 +1029,7 @@ void VariationalMeshSmoother::full_smooth(Array2D<Real> & R,
   if (adp*gr != 0)
     read_adp(afun);
 
+  // What does this block do?
   {
     int
       counter = 0,
@@ -1004,6 +1060,7 @@ void VariationalMeshSmoother::full_smooth(Array2D<Real> & R,
         if ((ladp != 0) && (gr == 0))
           adp_renew(R, cells, afun, adp);
 
+        // Executes one step of minimization algorithm
         Real Jk = minJ(R, maskf, cells, mcells, eps, w, me, H, vol, edges, hnodes,
                          msglev, Vmin, emax, qmin, ladp, afun);
 
@@ -1080,18 +1137,20 @@ void VariationalMeshSmoother::full_smooth(Array2D<Real> & R,
 
 
 // Determines the values of maxE_theta
-Real VariationalMeshSmoother::maxE(Array2D<Real> & R,
-                                     const Array2D<int> & cells,
-                                     const std::vector<int> & mcells,
-                                     int me,
-                                     const Array3D<Real> & H,
-                                     Real v,
-                                     Real epsilon,
-                                     Real w,
-                                     std::vector<Real> & Gamma,
-                                     Real & qmin)
+Real
+VariationalMeshSmoother::maxE(const Array2D<Real> & R,
+                              const Array2D<int> & cells,
+                              const std::vector<int> & mcells,
+                              int me,
+                              const Array3D<Real> & H,
+                              Real v,
+                              Real epsilon,
+                              Real w,
+                              std::vector<Real> & Gamma,
+                              Real & qmin)
 {
   Array2D<Real> Q(3, 3*_dim + _dim%2);
+  // What is K?
   std::vector<Real> K(9);
 
   Real
@@ -2216,6 +2275,7 @@ Real VariationalMeshSmoother::minJ(Array2D<Real> & R,
 
   int j = 1;
 
+  // What does this block do?
   while ((Jpr <= J) && (j > -30))
     {
       j = j-1;
@@ -2343,9 +2403,10 @@ Real VariationalMeshSmoother::minJ(Array2D<Real> & R,
       qmin = gqmin;
     }
 
-  nonzero = 0;
-  for (dof_id_type j2=0; j2<_n_nodes; j2++)
-    for (unsigned k=0; k<_dim; k++)
+    // This is where R is actually updated!
+    nonzero = 0;
+    for (dof_id_type j2 = 0; j2 < _n_nodes; j2++)
+      for (unsigned k = 0; k < _dim; k++)
       {
         R[j2][k] = R[j2][k] + T*P[j2][k];
         nonzero += T*P[j2][k]*T*P[j2][k];
@@ -2982,23 +3043,24 @@ Real VariationalMeshSmoother::minJ_BC(Array2D<Real> & R,
 
 
 // composes local matrix W and right side F from all quadrature nodes of one cell
-Real VariationalMeshSmoother::localP(Array3D<Real> & W,
-                                       Array2D<Real> & F,
-                                       Array2D<Real> & R,
-                                       const std::vector<int> & cell_in,
-                                       const std::vector<int> & mask,
-                                       Real epsilon,
-                                       Real w,
-                                       int nvert,
-                                       const Array2D<Real> & H,
-                                       int me,
-                                       Real vol,
-                                       int f,
-                                       Real & Vmin,
-                                       Real & qmin,
-                                       int adp,
-                                       const std::vector<Real> & afun,
-                                       std::vector<Real> & Gloc)
+Real
+VariationalMeshSmoother::localP(Array3D<Real> & W,
+                                Array2D<Real> & F,
+                                const Array2D<Real> & R,
+                                const std::vector<int> & cell_in,
+                                const std::vector<int> & mask,
+                                Real epsilon,
+                                Real w,
+                                int nvert,
+                                const Array2D<Real> & H,
+                                int me,
+                                Real vol,
+                                int f,
+                                Real & Vmin,
+                                Real & qmin,
+                                int adp,
+                                const std::vector<Real> & afun,
+                                std::vector<Real> & Gloc)
 {
   // K - determines approximation rule for local integral over the cell
   std::vector<Real> K(9);
@@ -3806,8 +3868,7 @@ int VariationalMeshSmoother::pcg_par_check(int n,
   return 0;
 }
 
-
-
+// Does PETSc have a solver than can do this solve? If so, why the implementation here?
 // Solve the SPD linear system by PCG method
 int VariationalMeshSmoother::pcg_ic0(int n,
                                      const std::vector<int> & ia,

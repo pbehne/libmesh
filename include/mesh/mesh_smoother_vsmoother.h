@@ -15,8 +15,6 @@
 // License along with this library; if not, write to the Free Software
 // Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-
-
 #ifndef LIBMESH_MESH_SMOOTHER_VSMOOTHER_H
 #define LIBMESH_MESH_SMOOTHER_VSMOOTHER_H
 
@@ -63,26 +61,25 @@ class UnstructuredMesh;
 class VariationalMeshSmoother : public MeshSmoother
 {
 public:
-
   /**
    * Simple constructor to use for smoothing purposes
    */
   VariationalMeshSmoother(UnstructuredMesh & mesh,
-                          Real theta=0.5,
-                          unsigned miniter=2,
-                          unsigned maxiter=5,
-                          unsigned miniterBC=5);
+                          Real theta = 0.5,
+                          unsigned miniter = 2,
+                          unsigned maxiter = 5,
+                          unsigned miniterBC = 5);
 
   /**
    * Slightly more complicated constructor for mesh redistribution based on adapt_data
    */
   VariationalMeshSmoother(UnstructuredMesh & mesh,
                           std::vector<float> * adapt_data,
-                          Real theta=0.5,
-                          unsigned miniter=2,
-                          unsigned maxiter=5,
-                          unsigned miniterBC=5,
-                          Real percent_to_move=1);
+                          Real theta = 0.5,
+                          unsigned miniter = 2,
+                          unsigned maxiter = 5,
+                          unsigned miniterBC = 5,
+                          Real percent_to_move = 1);
 
   /**
    * Even more complicated constructor for mesh redistribution based on adapt_data with an
@@ -91,25 +88,25 @@ public:
   VariationalMeshSmoother(UnstructuredMesh & mesh,
                           const UnstructuredMesh * area_of_interest,
                           std::vector<float> * adapt_data,
-                          Real theta=0.5,
-                          unsigned miniter=2,
-                          unsigned maxiter=5,
-                          unsigned miniterBC=5,
-                          Real percent_to_move=1);
+                          Real theta = 0.5,
+                          unsigned miniter = 2,
+                          unsigned maxiter = 5,
+                          unsigned miniterBC = 5,
+                          Real percent_to_move = 1);
 
   enum MetricType
-    {
-      UNIFORM = 1,
-      VOLUMETRIC = 2,
-      DIRECTIONAL = 3
-    };
+  {
+    UNIFORM = 1,
+    VOLUMETRIC = 2,
+    DIRECTIONAL = 3
+  };
 
   enum AdaptType
-    {
-      CELL = -1,
-      NONE = 0,
-      NODE = 1
-    };
+  {
+    CELL = -1,
+    NONE = 0,
+    NODE = 1
+  };
 
   /**
    * Destructor.
@@ -147,7 +144,6 @@ public:
   void set_metric(MetricType t) { _metric = t; }
 
 private:
-
   /**
    * Max distance of the last set of movement.
    */
@@ -225,18 +221,15 @@ private:
   template <typename T>
   struct Array2D
   {
-    Array2D(unsigned nx, unsigned ny) :
-      _data(nx, std::vector<T>(ny)) {}
+    Array2D(unsigned nx, unsigned ny) : _data(nx, std::vector<T>(ny)) {}
 
     // Accessors
-    std::vector<T> & operator[](unsigned i) {return _data[i];}
-    const std::vector<T> & operator[](unsigned i) const {return _data[i];}
+    std::vector<T> & operator[](unsigned i) { return _data[i]; }
+    const std::vector<T> & operator[](unsigned i) const { return _data[i]; }
 
   private:
     std::vector<std::vector<T>> _data;
   };
-
-
 
   /**
    * 3D array type for interfacing with C APIs.
@@ -244,19 +237,15 @@ private:
   template <typename T>
   struct Array3D
   {
-    Array3D(unsigned nx, unsigned ny, unsigned nz)
-    {
-      _data.resize(nx, Array2D<T>(ny,nz));
-    }
+    Array3D(unsigned nx, unsigned ny, unsigned nz) { _data.resize(nx, Array2D<T>(ny, nz)); }
 
     // Accessors
-    Array2D<T> & operator[](unsigned i) {return _data[i];}
-    const Array2D<T> & operator[](unsigned i) const {return _data[i];}
+    Array2D<T> & operator[](unsigned i) { return _data[i]; }
+    const Array2D<T> & operator[](unsigned i) const { return _data[i]; }
 
   private:
     std::vector<Array2D<T>> _data;
   };
-
 
   int writegr(const Array2D<Real> & R);
 
@@ -267,28 +256,19 @@ private:
              std::vector<int> & edges,
              std::vector<int> & hnodes);
 
-  int readmetr(std::string name,
-               Array3D<Real> & H);
+  int readmetr(std::string name, Array3D<Real> & H);
 
   int read_adp(std::vector<Real> & afun);
 
-  Real jac3(Real x1, Real y1, Real z1,
-            Real x2, Real y2, Real z2,
-            Real x3, Real y3, Real z3);
+  Real jac3(Real x1, Real y1, Real z1, Real x2, Real y2, Real z2, Real x3, Real y3, Real z3);
 
-  Real jac2(Real x1, Real y1,
-            Real x2, Real y2);
+  Real jac2(Real x1, Real y1, Real x2, Real y2);
 
-  int basisA(Array2D<Real> & Q,
-             int nvert,
-             const std::vector<Real> & K,
-             const Array2D<Real> & H,
-             int me);
+  int basisA(
+      Array2D<Real> & Q, int nvert, const std::vector<Real> & K, const Array2D<Real> & H, int me);
 
-  void adp_renew(const Array2D<Real> & R,
-                 const Array2D<int> & cells,
-                 std::vector<Real> & afun,
-                 int adp);
+  void
+  adp_renew(const Array2D<Real> & R, const Array2D<int> & cells, std::vector<Real> & afun, int adp);
 
   void full_smooth(Array2D<Real> & R,
                    const std::vector<int> & mask,
@@ -303,7 +283,7 @@ private:
                    int adp,
                    int gr);
 
-  Real maxE(Array2D<Real> & R,
+  Real maxE(const Array2D<Real> & R,
             const Array2D<int> & cells,
             const std::vector<int> & mcells,
             int me,
@@ -359,7 +339,7 @@ private:
 
   Real localP(Array3D<Real> & W,
               Array2D<Real> & F,
-              Array2D<Real> & R,
+              const Array2D<Real> & R,
               const std::vector<int> & cell_in,
               const std::vector<int> & mask,
               Real epsilon,
@@ -399,9 +379,7 @@ private:
               const std::vector<Real> & g,
               Real sigma);
 
-  void metr_data_gen(std::string grid,
-                     std::string metr,
-                     int me);
+  void metr_data_gen(std::string grid, std::string metr, int me);
 
   int solver(int n,
              const std::vector<int> & ia,
