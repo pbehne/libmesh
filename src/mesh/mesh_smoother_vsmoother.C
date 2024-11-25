@@ -177,7 +177,8 @@ VariationalMeshSmoother::smooth(unsigned int n_iterations)
 
   Array2D<Real> R(_n_nodes, _dim);
   Array2D<int> cells(_n_cells, 3*_dim + _dim%2);
-  Array3D<Real> H(_n_cells, _dim, _dim);
+  Array3D<Real> H(_n_cells, _dim, _dim); // From context, it appears that H holds metric (volume?)
+                                         // informaiton (see readmtr method) and is not the Hessian
 
   // initial grid
   int vms_err = readgr(R, mask, cells, mcells, edges, hnodes);
@@ -272,9 +273,8 @@ int VariationalMeshSmoother::writegr(const Array2D<Real> & R)
   return 0;
 }
 
-
-
 // reading grid from input file
+// TODO get rid of this funciton, query data from memory directly
 int VariationalMeshSmoother::readgr(Array2D<Real> & R,
                                     std::vector<int> & mask,
                                     Array2D<int> & cells,
@@ -462,7 +462,8 @@ int VariationalMeshSmoother::readgr(Array2D<Real> & R,
               case 4:  // Quad 4
                 cells[i][0] = elem->node_id(0);
                 cells[i][1] = elem->node_id(1);
-                cells[i][2] = elem->node_id(3); // Note that 2 and 3 are switched! WHY???
+                cells[i][2] = elem->node_id(3); // Note that 2 and 3 are switched! This affects
+                                                // local size/shape calculations
                 cells[i][3] = elem->node_id(2);
                 num = 4;
                 break;
@@ -487,12 +488,14 @@ int VariationalMeshSmoother::readgr(Array2D<Real> & R,
               case 8:
                 cells[i][0] = elem->node_id(0);
                 cells[i][1] = elem->node_id(1);
-                cells[i][2] = elem->node_id(3); // Note that 2 and 3 are switched! WHY???
+                cells[i][2] = elem->node_id(3); // Note that 2 and 3 are switched! This affects
+                                                // local size/shape calculations
                 cells[i][3] = elem->node_id(2);
 
                 cells[i][4] = elem->node_id(4);
                 cells[i][5] = elem->node_id(5);
-                cells[i][6] = elem->node_id(7); // Note that 6 and 7 are switched! WHY???
+                cells[i][6] = elem->node_id(7); // Note that 6 and 7 are switched! This affects
+                                                // local size/shape calculations
                 cells[i][7] = elem->node_id(6);
                 num=8;
                 break;
@@ -673,16 +676,18 @@ Real VariationalMeshSmoother::jac2(Real x1,
   return x1*y2 - x2*y1;
 }
 
-
-
-// BasisA determines matrix H^(-T)Q on one Jacobian matrix
-int VariationalMeshSmoother::basisA(Array2D<Real> & Q,
-                                    int nvert,
-                                    const std::vector<Real> & K,
-                                    const Array2D<Real> & H,
-                                    int me)
+// BasisA determines matrix H^(-T)Q on one Jacobian matrix // In this context, is H the hessian?
+int
+VariationalMeshSmoother::basisA(
+    Array2D<Real> & Q,
+    const int nvert,
+    const std::vector<Real> & K, // What is K? U (defined below in method) relies on it. It seems to
+                                 // be passed in as all zeros (for triangles, see method minq)
+    const Array2D<Real> & H,
+    int me)
 {
-  Array2D<Real> U(_dim, nvert); // What does U represent, the Jacobian?
+  Array2D<Real> U(_dim,
+                  nvert); // What does U represent, reference element vertices? Quadrature points?
 
   // Some useful constants
   const Real
@@ -713,6 +718,7 @@ int VariationalMeshSmoother::basisA(Array2D<Real> & Q,
           // U[0][2] = 0.;  U[1][2] = 1.;
 
           // for regular triangle
+          // These seem to be coordinates of an equilateral triangle with side length 2
           U[0][0] = -1.;
           U[0][1] =  1.;
           U[0][2] =    0;
@@ -962,6 +968,7 @@ void VariationalMeshSmoother::full_smooth(Array2D<Real> & R,
         afun_size = _n_nodes;
 
     std::vector<Real> afun(afun_size);
+    // mask for external face nodes
     std::vector<int> maskf(_n_nodes);
     std::vector<Real> Gamma(_n_cells);
 
@@ -972,8 +979,13 @@ void VariationalMeshSmoother::full_smooth(Array2D<Real> & R,
     // Boundary node counting
     int NBN = 0;
     for (dof_id_type i = 0; i < _n_nodes; i++)
-        if (mask[i] == 2 || mask[i] == 1)
+        if (mask[i] == 1 || mask[i] == 2)
+        {
           NBN++;
+          maskf[i] = 1;
+        }
+        else
+          maskf[i] = 0;
 
     if (NBN > 0)
     {
@@ -987,14 +999,6 @@ void VariationalMeshSmoother::full_smooth(Array2D<Real> & R,
 
       if (msglev >= 1)
         _logfile << "# of moving Boundary Nodes=" << NBN << std::endl;
-    }
-
-  for (dof_id_type i=0; i<_n_nodes; i++)
-    {
-      if ((mask[i]==1) || (mask[i]==2))
-        maskf[i] = 1;
-      else
-        maskf[i] = 0;
     }
 
   // determination of min jacobian
@@ -1029,7 +1033,7 @@ void VariationalMeshSmoother::full_smooth(Array2D<Real> & R,
   if (adp*gr != 0)
     read_adp(afun);
 
-  // What does this block do?
+  // Main loop for minimization
   {
     int
       counter = 0,
@@ -1572,12 +1576,15 @@ Real VariationalMeshSmoother::minq(const Array2D<Real> & R,
                 // tri
                 basisA(Q, 3, K, H[ii], me);
 
+                // Vectors to hold the Jacobian
                 std::vector<Real> a1(3), a2(3);
                 for (int k=0; k<2; k++)
                   for (int l=0; l<3; l++)
                     {
-                      a1[k] += Q[k][l]*R[cells[ii][l]][0];
-                      a2[k] += Q[k][l]*R[cells[ii][l]][1];
+                          // This seems to map reference quad points to real-space quad points,
+                          // which is also the Jacobian?
+                          a1[k] += Q[k][l] * R[cells[ii][l]][0];
+                          a2[k] += Q[k][l] * R[cells[ii][l]][1];
                     }
 
                 Real det = jac2(a1[0],a1[1],a2[0],a2[1]);
@@ -1970,7 +1977,8 @@ Real VariationalMeshSmoother::minJ(Array2D<Real> & R,
   // columns - max number of nonzero entries in every row of global matrix
   int columns = _dim*_dim*10;
 
-  // local Hessian matrix
+  // local element contribution to global Hessian matrix
+  // 3 * _dim + _dim%2 is max number of vertices in _dim.
   Array3D<Real> W(_dim, 3*_dim + _dim%2, 3*_dim + _dim%2);
 
   // F - local gradient
@@ -2021,16 +2029,14 @@ Real VariationalMeshSmoother::minJ(Array2D<Real> & R,
               for (auto k : make_range(std::abs(adp)))
                 G[i][j] += afun[i*(-adp)+k];  // cell-based adaptivity is computed here
             }
-        }
-      for (unsigned index=0; index<_dim; index++)
-        {
+
           // initialize local matrices
           for (unsigned k=0; k<3*_dim + _dim%2; k++)
             {
-              F[index][k] = 0;
+              F[j][k] = 0;
 
-              for (unsigned j=0; j<3*_dim + _dim%2; j++)
-                W[index][k][j] = 0;
+              for (unsigned jj = 0; jj < 3 * _dim + _dim % 2; jj++)
+                W[j][k][jj] = 0;
             }
         }
       if (mcells[i] >= 0)
@@ -3687,11 +3693,10 @@ Real VariationalMeshSmoother::vertex(Array3D<Real> & W,
   return fet*sigma;
 }
 
-
-
 // Solve Symmetric Positive Definite (SPD) linear system
 // by Conjugate Gradient (CG) method preconditioned by
 // Point Jacobi (diagonal scaling)
+// TODO: get rid of this, use libmesh linear solver
 int VariationalMeshSmoother::solver(int n,
                                     const std::vector<int> & ia,
                                     const std::vector<int> & ja,
