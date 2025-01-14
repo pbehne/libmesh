@@ -177,8 +177,11 @@ VariationalMeshSmoother::smooth(unsigned int n_iterations)
 
   Array2D<Real> R(_n_nodes, _dim);
   Array2D<int> cells(_n_cells, 3*_dim + _dim%2);
-  Array3D<Real> H(_n_cells, _dim, _dim); // From context, it appears that H holds metric (volume?)
-                                         // informaiton (see readmtr method) and is not the Hessian
+  // From context, it appears that H holds metric (volume?) information (see
+  // readmetr method) and is not the Hessian. From section 6.2.1, it seems
+  // that H is the Jacobian of the mapping from the reference to the target
+  // element.
+  Array3D<Real> H(_n_cells, _dim, _dim);
 
   // initial grid
   int vms_err = readgr(R, mask, cells, mcells, edges, hnodes);
@@ -676,18 +679,19 @@ Real VariationalMeshSmoother::jac2(Real x1,
   return x1*y2 - x2*y1;
 }
 
-// BasisA determines matrix H^(-T)Q on one Jacobian matrix // In this context, is H the hessian?
+// BasisA determines matrix H^(-T)Q on one Jacobian matrix
 int
 VariationalMeshSmoother::basisA(
     Array2D<Real> & Q,
     const int nvert,
-    const std::vector<Real> & K, // What is K? U (defined below in method) relies on it. It seems to
-                                 // be passed in as all zeros (for triangles, see method minq)
+    // K is an offset of sorts used to define quadarature points
+    const std::vector<Real> & K,
+    // H seems to be the Jacobian of the mapping from the reference to the target element
     const Array2D<Real> & H,
     int me)
 {
-  Array2D<Real> U(_dim,
-                  nvert); // What does U represent, reference element vertices? Quadrature points?
+  // Quadrature points
+  Array2D<Real> U(_dim, nvert);
 
   // Some useful constants
   const Real
@@ -875,7 +879,11 @@ VariationalMeshSmoother::basisA(
 
   else
     {
-      for (unsigned i=0; i<_dim; i++)
+    // Compute Q = H^T * U
+    // Why H^T? I don't know. If H is the Jacobian of the mapping from the
+    // reference element to the target element (sec 6.2.1), H should be
+    // symmetric. There is no symmetry check when H is read in, though.
+    for (unsigned i = 0; i < _dim; i++)
         for (int j=0; j<nvert; j++)
           {
             Q[i][j] = 0;
@@ -1003,6 +1011,9 @@ void VariationalMeshSmoother::full_smooth(Array2D<Real> & R,
 
   // determination of min jacobian
   Real vol, Vmin;
+  // Compute min Jacobian determinant (minq), min cell volume (Vmin), and average cell volume (vol).
+  // Could this possibly be replaced by other libmesh code?
+  // See https://moosedevelopers.slack.com/archives/C04U14MR5HB/p1734103446415429
   Real qmin = minq(R, cells, mcells, me, H, vol, Vmin);
 
   if (me > 1)
@@ -1154,7 +1165,7 @@ VariationalMeshSmoother::maxE(const Array2D<Real> & R,
                               Real & qmin)
 {
   Array2D<Real> Q(3, 3*_dim + _dim%2);
-  // What is K?
+  // K is an offset vector used to determine quadrature rules
   std::vector<Real> K(9);
 
   Real
@@ -1174,6 +1185,9 @@ VariationalMeshSmoother::maxE(const Array2D<Real> & R,
                 // tri
                 basisA(Q, 3, K, H[ii], me);
 
+                // Let map be the map from the reference to the physical domain.
+                // From context, a1 is d(map_.)/dx and a2 is d(map_.)/dy, . = 1, 2
+                // Together, a1 and a2 form the Jacobian (S) of this map.
                 std::vector<Real> a1(3), a2(3);
                 for (int k=0; k<2; k++)
                   for (int l=0; l<3; l++)
@@ -1183,7 +1197,10 @@ VariationalMeshSmoother::maxE(const Array2D<Real> & R,
                     }
 
                 Real det = jac2(a1[0], a1[1], a2[0], a2[1]);
+                // This is 0.5 * tr(S^T*S), i.e., g_3^2 from pg 26 of dissertation
                 Real tr = 0.5*(a1[0]*a1[0] + a2[0]*a2[0] + a1[1]*a1[1] + a2[1]*a2[1]);
+                // This is chi(det(S)), useful when det(S) <= 0. It replaced det(S) in any
+                // denominators.
                 Real chi = 0.5*(det+std::sqrt(det*det+epsilon*epsilon));
                 E = (1-w)*tr/chi + 0.5*w*(v + det*det/v)/chi;
 
@@ -1251,6 +1268,7 @@ VariationalMeshSmoother::maxE(const Array2D<Real> & R,
                             }
 
                         Real det = jac2(a1[0],a1[1],a2[0],a2[1]);
+                        // Quadrature weight
                         Real sigma = 1./24.;
 
                         if (i==j)
